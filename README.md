@@ -1,6 +1,7 @@
 # Monitor Service – Daily App Usage Tracker
 Like Google Family Link, no account, just a service  
 Test my device Pixel 7, its work, OEMs maybe :3
+
 This Android foreground service monitors which apps are used in the foreground between **8:00 AM and 7:00 PM** every day.
 
 - Detects when an app has been open for ≥ **10 minutes** 
