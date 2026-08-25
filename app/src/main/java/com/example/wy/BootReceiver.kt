@@ -8,16 +8,16 @@ import androidx.core.content.ContextCompat
 
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context?, intent: Intent?) {
+        if (context == null || intent?.action != Intent.ACTION_BOOT_COMPLETED) return
         Log.d("BootReceiver", "Boot completed")
-        if (intent?.action == Intent.ACTION_BOOT_COMPLETED) {
-            DailyScheduler.scheduler(context!!)
-        }
+        DailyScheduler.scheduler(context)
         if (isWithinActiveHours()) {
             Log.d("BootReceiver", "Starting service")
+            MonitorState.setEnabled(context, true)
             ContextCompat.startForegroundService(
-                context!!,
+                context,
                 Intent(context, MonitorService::class.java).apply {
-                    putExtra("action", "start_monitor")
+                    putExtra("action", AlarmReceiver.ACTION_START)
                 }
             )
         }

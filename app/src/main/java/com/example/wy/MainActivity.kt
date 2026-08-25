@@ -47,13 +47,12 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         requestUnrestrictedBattery()
-        // This runs both on first launch AND when returning from Settings
-        if (hasUsageStatsPermission() && !isServiceRunning(MonitorService::class.java)) {
+        DailyScheduler.scheduler(this)
+        if (hasUsageStatsPermission() && isWithinActiveHours() &&
+            !isServiceRunning(MonitorService::class.java)
+        ) {
+            MonitorState.setEnabled(this, true)
             startMonitorService()
-        }
-        val am = getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && am.canScheduleExactAlarms()) {
-            DailyScheduler.scheduler(this)
         }
     }
 

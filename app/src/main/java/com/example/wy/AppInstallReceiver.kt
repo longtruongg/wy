@@ -5,27 +5,14 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.util.Log
-import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
 import java.net.HttpURLConnection
 import java.net.URL
 import java.time.LocalDateTime
 import kotlin.concurrent.thread
 
-@SuppressLint("UnsafeOptInUsageError")
-@Serializable
-data class Payload(
-    val timestamp: String,
-    val appName: String,
-    val active: String
-)
-
 class AppInstallReceiver : BroadcastReceiver() {
     companion object {
-        private val client = OkHttpClient()
-        private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
         private const val TAG = "AppInstallReceiver"
     }
 
@@ -33,6 +20,10 @@ class AppInstallReceiver : BroadcastReceiver() {
         Log.d(TAG, "onReceive called : Broadcast Received! Action: ${intent?.action}")
         if (context == null || intent?.action != Intent.ACTION_PACKAGE_ADDED) {
             Log.d(TAG, "context is null or action is not ACTION_PACKAGE_ADDED")
+            return
+        }
+        if (intent.getBooleanExtra(Intent.EXTRA_REPLACING, false)) {
+            Log.d(TAG, "skip update (EXTRA_REPLACING)")
             return
         }
         val packageName = intent.data?.schemeSpecificPart ?: run {
@@ -50,28 +41,26 @@ class AppInstallReceiver : BroadcastReceiver() {
             return
         }
         Log.w(TAG, "appName ====> $appName")
-
-        thread(name = "send app name") {
-            sendIt(appName, packageName)
-        }
+        sendIt(appName, packageName)
     }
 
+    @SuppressLint("UnsafeOptInUsageError")
     private fun sendIt(appName: String, pkg: String) {
         val payload = mapOf(
             "timestamp" to LocalDateTime.now().toString(),
             "appName" to appName,
             "package" to pkg
-            // "active" not needed anymore since endpoint implies it
         )
 
-        thread {
+        thread(name = "send-app-installed") {
+            var conn: HttpURLConnection? = null
             try {
                 val json = Json.encodeToString(payload)
-                val url = URL("http://${BASE_IP}:8080/api/app-installed")
-                val conn = url.openConnection() as HttpURLConnection
-                conn.apply {
+                conn = (URL(cathyUrl("/api/app-installed")).openConnection() as HttpURLConnection).apply {
                     requestMethod = "POST"
                     doOutput = true
+                    connectTimeout = 10000
+                    readTimeout = 10000
                     setRequestProperty("Content-Type", "application/json")
                     outputStream.use { it.write(json.toByteArray(Charsets.UTF_8)) }
                 }
@@ -84,6 +73,8 @@ class AppInstallReceiver : BroadcastReceiver() {
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Install send error", e)
+            } finally {
+                conn?.disconnect()
             }
         }
     }

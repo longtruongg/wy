@@ -43,21 +43,6 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        <activity
-            android:name=".UninstallFeedbackActivity"
-            android:excludeFromRecents="true"
-            android:exported="true"
-            android:theme="@style/Theme.AppCompat.Dialog">
-            <intent-filter>
-                <!-- This intercepts the uninstall action -->
-                <action android:name="android.intent.action.VIEW" />
-                <action android:name="android.intent.action.DELETE" />
-
-                <category android:name="android.intent.category.DEFAULT" />
-                <data android:scheme="package" />
-            </intent-filter>
-        </activity>
-
         <service
             android:name=".MonitorService"
             android:exported="false"
@@ -67,11 +52,6 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Monitoring in" />
         </service>
-
-        <service
-            android:name=".RestartService"
-            android:exported="false"
-            tools:ignore="Instantiatable" />
 
         <receiver
             android:name=".AppInstallReceiver"
@@ -89,6 +69,9 @@
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
+        <receiver
+            android:name=".AlarmReceiver"
+            android:exported="false" />
     </application>
 
 </manifest>

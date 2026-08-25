@@ -12,9 +12,6 @@ import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
-import android.content.pm.ApplicationInfo
-import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
@@ -22,7 +19,6 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.annotation.RequiresPermission
 import androidx.core.app.NotificationCompat
-import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -35,20 +31,67 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.net.HttpURLConnection
 import java.net.URL
+import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.ZoneId
-import java.util.Calendar
 import kotlin.concurrent.thread
 
-val BASE_IP = "backend_ip"
+const val BASE_IP = "backend_ip"
+
+fun cathyUrl(path: String) = "http://$BASE_IP:8080$path"
+
+object MonitorState {
+    private const val PREFS = "monitor_state"
+    private const val KEY_ENABLED = "enabled"
+
+    fun setEnabled(ctx: Context, enabled: Boolean) {
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_ENABLED, enabled)
+            .apply()
+    }
+
+    fun isEnabled(ctx: Context): Boolean =
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_ENABLED, false)
+}
+
+object KillRestart {
+    private const val REQUEST = 1003
+    const val DELAY_MS = 10_000L
+
+    fun schedule(ctx: Context) {
+        if (!MonitorState.isEnabled(ctx) || !isWithinActiveHours()) return
+        val am = ctx.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        am.setExactAndAllowWhileIdle(
+            AlarmManager.ELAPSED_REALTIME_WAKEUP,
+            SystemClock.elapsedRealtime() + DELAY_MS,
+            pending(ctx)
+        )
+        Log.e("KillRestart", "restart scheduled in ${DELAY_MS / 1000}s")
+    }
+
+    fun cancel(ctx: Context) {
+        val am = ctx.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        am.cancel(pending(ctx))
+    }
+
+    private fun pending(ctx: Context): PendingIntent =
+        PendingIntent.getBroadcast(
+            ctx,
+            REQUEST,
+            Intent(ctx, AlarmReceiver::class.java)
+                .putExtra(AlarmReceiver.EXTRA_ACTION, AlarmReceiver.ACTION_START),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+}
 
 class MonitorService : Service() {
 
     private var monitoringJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private val TAG = "MonitorService"
-    private lateinit var installReceiver: AppInstallReceiver
     private val channelId = "monitor_channel"
 
     private var currentForegroundPkg: String? = null
@@ -57,13 +100,10 @@ class MonitorService : Service() {
 
     private val reportedPackages = mutableSetOf<String>()
 
-    private val MIN_OPEN_TIME_MS = 10 * 60 * 1000L      // 5 min threshold
-    private val ABSENCE_TOLERANCE_MS = 3 * 60 * 1000L  // 3 min gap tolerance (> 5 min window)
+    private val MIN_OPEN_TIME_MS = 10 * 60 * 1000L
+    private val ABSENCE_TOLERANCE_MS = 3 * 60 * 1000L
     private val POLL_INTERVAL_MS = 30_000L
-
-    // FIX: Query window must be LONGER than MIN_OPEN_TIME_MS
-    // so the original open event is always within the window
-    private val QUERY_WINDOW_MS = 15 * 60 * 1000L      // 10 min query window
+    private val QUERY_WINDOW_MS = 15 * 60 * 1000L
 
     override fun onCreate() {
         super.onCreate()
@@ -91,18 +131,6 @@ class MonitorService : Service() {
             stopSelf()
             return
         }
-
-        installReceiver = AppInstallReceiver()
-        val filter = IntentFilter(Intent.ACTION_PACKAGE_ADDED).apply {
-            addDataScheme("package")
-        }
-        ContextCompat.registerReceiver(
-            this,
-            installReceiver,
-            filter,
-            ContextCompat.RECEIVER_EXPORTED
-        )
-        Log.i(TAG, "AppInstallReceiver registered")
     }
 
     private fun createNotificationChannel() {
@@ -122,18 +150,35 @@ class MonitorService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = intent?.getStringExtra("action")
         when (action) {
-            "stop" -> {
-                Log.i(TAG, "Received stop command → stopping service")
-                stopSelf()
+            AlarmReceiver.ACTION_STOP -> {
+                Log.i(TAG, "19:00 stop → sending daily results then stopping")
+                MonitorState.setEnabled(this, false)
+                KillRestart.cancel(this)
+                DailyScheduler.scheduler(this)
+                monitoringJob?.cancel()
+                thread(name = "flush-daily-results") {
+                    sendDailyResults()
+                    stopSelf()
+                }
                 return START_NOT_STICKY
             }
 
-            "start_monitor", null -> {
-                // normal start
+            AlarmReceiver.ACTION_START, null -> {
+                MonitorState.setEnabled(this, true)
             }
+        }
 
-            else -> {}
-
+        if (!isWithinActiveHours()) {
+            Log.i(TAG, "Outside 08:00–19:00 → sending results then stopping")
+            MonitorState.setEnabled(this, false)
+            KillRestart.cancel(this)
+            DailyScheduler.scheduler(this)
+            monitoringJob?.cancel()
+            thread(name = "flush-daily-results") {
+                sendDailyResults()
+                stopSelf()
+            }
+            return START_NOT_STICKY
         }
 
         if (!hasUsageStatsPermission()) {
@@ -141,10 +186,11 @@ class MonitorService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        startMonitoring()
+        if (monitoringJob?.isActive != true) {
+            startMonitoring()
+        }
+        DailyScheduler.scheduler(this)
         return START_STICKY
-
-
     }
 
     private fun hasUsageStatsPermission(): Boolean {
@@ -159,31 +205,28 @@ class MonitorService : Service() {
 
     private fun startMonitoring() {
         monitoringJob?.cancel()
+        reportedPackages.clear()
+        currentForegroundPkg = null
+        sessionStartTime = 0L
+        lastConfirmedTime = 0L
         monitoringJob = scope.launch {
             while (isActive) {
                 val currentTime = System.currentTimeMillis()
 
                 if (!isWithinActiveHours()) {
-                    Log.d(TAG, "Outside active hours — pausing monitoring")
-                    currentForegroundPkg = null
-                    sessionStartTime = 0L
-                    lastConfirmedTime = 0L
-                    delay(5 * 60_000) // check again every 1 minute
-                    continue
-                }
-
-                // Reset at midnight
-                val calendar = Calendar.getInstance()
-                if (calendar.get(Calendar.HOUR_OF_DAY) == 0 && calendar.get(Calendar.MINUTE) == 0) {
-                    reportedPackages.clear()
-                    Log.d(TAG, "Daily reset done")
+                    Log.d(TAG, "Outside active hours — sending results then stopping")
+                    MonitorState.setEnabled(this@MonitorService, false)
+                    KillRestart.cancel(this@MonitorService)
+                    DailyScheduler.scheduler(this@MonitorService)
+                    sendDailyResults()
+                    stopSelf()
+                    return@launch
                 }
 
                 val fgPkg = getCurrentForegroundPackage()
 
                 if (fgPkg != null) {
                     if (fgPkg == currentForegroundPkg) {
-                        // Same app confirmed in foreground
                         lastConfirmedTime = currentTime
                         val totalTime = currentTime - sessionStartTime
                         Log.d(
@@ -199,43 +242,35 @@ class MonitorService : Service() {
                             sendApplicationOpening(fgPkg, totalTime)
                             reportedPackages.add(fgPkg)
                         }
-
                     } else {
-                        // New app came to foreground
                         Log.d(TAG, "New foreground app: $fgPkg (previous: $currentForegroundPkg)")
                         currentForegroundPkg = fgPkg
                         sessionStartTime = currentTime
                         lastConfirmedTime = currentTime
                     }
+                } else if (currentForegroundPkg != null) {
+                    val absentDuration = currentTime - lastConfirmedTime
 
-                } else {
-                    // App not detected this poll
-                    if (currentForegroundPkg != null) {
-                        val absentDuration = currentTime - lastConfirmedTime
+                    if (absentDuration > ABSENCE_TOLERANCE_MS) {
+                        Log.d(
+                            TAG,
+                            "App '$currentForegroundPkg' gone for ${absentDuration / 1000}s — clearing"
+                        )
+                        currentForegroundPkg = null
+                    } else {
+                        val totalTime = currentTime - sessionStartTime
+                        Log.d(
+                            TAG,
+                            "Brief gap ${absentDuration / 1000}s — total session: ${totalTime / 1000}s for $currentForegroundPkg"
+                        )
 
-                        if (absentDuration > ABSENCE_TOLERANCE_MS) {
-                            // Truly gone
-                            Log.d(
+                        if (totalTime >= MIN_OPEN_TIME_MS && currentForegroundPkg !in reportedPackages) {
+                            Log.i(
                                 TAG,
-                                "App '$currentForegroundPkg' gone for ${absentDuration / 1000}s — clearing"
+                                "THRESHOLD REACHED (gap) → $currentForegroundPkg open for ${totalTime / 60000} min"
                             )
-                            currentForegroundPkg = null
-                        } else {
-                            // Brief gap — keep counting total session time
-                            val totalTime = currentTime - sessionStartTime
-                            Log.d(
-                                TAG,
-                                "Brief gap ${absentDuration / 1000}s — total session: ${totalTime / 1000}s for $currentForegroundPkg"
-                            )
-
-                            if (totalTime >= MIN_OPEN_TIME_MS && currentForegroundPkg !in reportedPackages) {
-                                Log.i(
-                                    TAG,
-                                    "THRESHOLD REACHED (gap) → $currentForegroundPkg open for ${totalTime / 60000} min"
-                                )
-                                sendApplicationOpening(currentForegroundPkg!!, totalTime)
-                                reportedPackages.add(currentForegroundPkg!!)
-                            }
+                            sendApplicationOpening(currentForegroundPkg!!, totalTime)
+                            reportedPackages.add(currentForegroundPkg!!)
                         }
                     }
                 }
@@ -255,7 +290,60 @@ class MonitorService : Service() {
     )
 
     @OptIn(InternalSerializationApi::class)
-    private fun sendApplicationOpening(pkg: String, durationMs: Long) {
+    private fun sendDailyResults() {
+        if (!hasUsageStatsPermission()) {
+            Log.w(TAG, "skip daily flush — no usage stats permission")
+            return
+        }
+        val zone = ZoneId.systemDefault()
+        val begin = LocalDate.now(zone).atTime(8, 0).atZone(zone).toInstant().toEpochMilli()
+        val end = System.currentTimeMillis()
+        val durations = foregroundDurations(begin, end)
+        Log.i(TAG, "daily flush: ${durations.size} apps seen since 08:00")
+        for ((pkg, durationMs) in durations) {
+            if (pkg == packageName) continue
+            if (durationMs < MIN_OPEN_TIME_MS) continue
+            if (pkg in reportedPackages) continue
+            sendApplicationOpening(pkg, durationMs, blocking = true)
+            reportedPackages.add(pkg)
+        }
+    }
+
+    private fun foregroundDurations(begin: Long, end: Long): Map<String, Long> {
+        val usageStatsManager = getSystemService(USAGE_STATS_SERVICE) as UsageStatsManager
+        val usageEvents = usageStatsManager.queryEvents(begin, end) ?: return emptyMap()
+        val durations = mutableMapOf<String, Long>()
+        val openSince = mutableMapOf<String, Long>()
+        val event = UsageEvents.Event()
+        while (usageEvents.hasNextEvent()) {
+            usageEvents.getNextEvent(event)
+            when (event.eventType) {
+                UsageEvents.Event.ACTIVITY_RESUMED,
+                UsageEvents.Event.MOVE_TO_FOREGROUND -> {
+                    openSince[event.packageName] = event.timeStamp
+                }
+
+                UsageEvents.Event.ACTIVITY_PAUSED,
+                UsageEvents.Event.MOVE_TO_BACKGROUND -> {
+                    val started = openSince.remove(event.packageName) ?: continue
+                    val d = event.timeStamp - started
+                    if (d > 0) {
+                        durations[event.packageName] = (durations[event.packageName] ?: 0L) + d
+                    }
+                }
+            }
+        }
+        for ((pkg, started) in openSince) {
+            val d = end - started
+            if (d > 0) {
+                durations[pkg] = (durations[pkg] ?: 0L) + d
+            }
+        }
+        return durations
+    }
+
+    @OptIn(InternalSerializationApi::class)
+    private fun sendApplicationOpening(pkg: String, durationMs: Long, blocking: Boolean = false) {
         val appName = try {
             packageManager.getApplicationLabel(
                 packageManager.getApplicationInfo(pkg, 0)
@@ -267,7 +355,8 @@ class MonitorService : Service() {
         val durationMin = durationMs / 60000
         Log.w(TAG, "SENDING → $appName ($pkg) open for $durationMin min")
 
-        thread(name = "send-long-open") {
+        val work = {
+            var conn: HttpURLConnection? = null
             try {
                 val payload = AppOpenedLongPayload(
                     timestamp = java.time.LocalDateTime.now().toString(),
@@ -277,9 +366,7 @@ class MonitorService : Service() {
                 )
                 val json = Json.encodeToString(payload)
 
-                val url = URL("http://${BASE_IP}/api/app-opened-long")
-                val conn = url.openConnection() as HttpURLConnection
-                conn.apply {
+                conn = (URL(cathyUrl("/api/app-opened-long")).openConnection() as HttpURLConnection).apply {
                     requestMethod = "POST"
                     doOutput = true
                     connectTimeout = 10000
@@ -296,7 +383,16 @@ class MonitorService : Service() {
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to send long-open event", e)
+            } finally {
+                conn?.disconnect()
             }
+        }
+
+        if (blocking) {
+            val t = thread(name = "send-long-open") { work() }
+            t.join(15_000)
+        } else {
+            thread(name = "send-long-open") { work() }
         }
     }
 
@@ -338,80 +434,26 @@ class MonitorService : Service() {
         return lastForegroundPackage
     }
 
-    private fun isGameApplication(packageName: String): Boolean {
-        return try {
-            val appInfo = packageManager.getApplicationInfo(packageName, 0)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                appInfo.category == ApplicationInfo.CATEGORY_GAME
-            } else {
-                @Suppress("DEPRECATION")
-                (appInfo.flags and ApplicationInfo.FLAG_IS_GAME) != 0
-            }
-        } catch (e: PackageManager.NameNotFoundException) {
-            false
-        } catch (e: Exception) {
-            false
-        }
-    }
-
     override fun onDestroy() {
-        Log.e(TAG, "⚠️ onDestroy fired")
+        Log.e(TAG, "onDestroy fired")
         monitoringJob?.cancel()
-        try {
-            unregisterReceiver(installReceiver)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error unregistering receiver", e)
+        if (MonitorState.isEnabled(this) && isWithinActiveHours()) {
+            KillRestart.schedule(this)
         }
-        val restartIntent = Intent(applicationContext, RestartService::class.java)
-        val pendingIntent = PendingIntent.getBroadcast(
-            applicationContext,
-            1,
-            restartIntent,
-            PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE
-        )
-        val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        alarmManager.setExactAndAllowWhileIdle(
-            AlarmManager.ELAPSED_REALTIME,
-            SystemClock.elapsedRealtime() + 6000,
-            pendingIntent
-        )
-
-
-        //restart service
-//        sendBroadcast(Intent(applicationContext, RestartService::class.java))
         Log.d(TAG, "MonitorService destroyed")
         super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    @SuppressLint("SuspiciousIndentation")
     @RequiresPermission(Manifest.permission.SCHEDULE_EXACT_ALARM)
     override fun onTaskRemoved(rootIntent: Intent?) {
-        Log.e(TAG, "⚠️ onTaskRemoved fired")
+        Log.e(TAG, "onTaskRemoved fired — user removed task")
         super.onTaskRemoved(rootIntent)
-        Log.d(TAG, "Task removed — scheduling restart")
-        val restartIntent = Intent(applicationContext, MonitorService::class.java)
-        val pendingIntent = PendingIntent.getService(
-            applicationContext,
-            1,
-            restartIntent,
-            PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE
-        )
-        val alarmManager = getSystemService(ALARM_SERVICE) as AlarmManager
-        alarmManager.setExactAndAllowWhileIdle(
-            AlarmManager.ELAPSED_REALTIME,
-            SystemClock.elapsedRealtime() + 6000,
-            pendingIntent
-        )
-        Log.e(TAG, "⚠️ Restart scheduled in 6 seconds")
+        if (MonitorState.isEnabled(this) && isWithinActiveHours()) {
+            KillRestart.schedule(this)
+        }
     }
-
-    private fun isAppRemoved(): Boolean {
-        return false
-    }
-
-
 }
 
 fun isWithinActiveHours(): Boolean {
@@ -421,47 +463,49 @@ fun isWithinActiveHours(): Boolean {
     return !now.isBefore(start) && now.isBefore(end)
 }
 
-
 object DailyScheduler {
     private const val REQUEST_START = 1001
     private const val REQUEST_STOP = 1002
+
     fun scheduler(ctx: Context) {
         val am = ctx.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            if (!am.canScheduleExactAlarms()) {
-                // Show UI → guide user to Settings → Alarms & reminders → allow for your app
-                return
-            }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !am.canScheduleExactAlarms()) {
+            Log.w("DailyScheduler", "exact alarms not allowed")
+            return
         }
-        val startPI = PendingIntent.getService(
+        val startPI = PendingIntent.getBroadcast(
             ctx,
             REQUEST_START,
-            Intent(ctx, MonitorService::class.java).putExtra("action", "start"),
+            Intent(ctx, AlarmReceiver::class.java)
+                .putExtra(AlarmReceiver.EXTRA_ACTION, AlarmReceiver.ACTION_START),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        val stopPI = PendingIntent.getService(
+        val stopPI = PendingIntent.getBroadcast(
             ctx,
             REQUEST_STOP,
-            Intent(ctx, MonitorService::class.java).putExtra("action", "stop"),
+            Intent(ctx, AlarmReceiver::class.java)
+                .putExtra(AlarmReceiver.EXTRA_ACTION, AlarmReceiver.ACTION_STOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        val now = LocalDateTime.now(ZoneId.systemDefault())
-        var nextStart = now.withHour(8).withMinute(0).withSecond(0).withNano(0)
-        if (nextStart.isBefore(now)) nextStart = nextStart.plusDays(1)
+        val zone = ZoneId.systemDefault()
+        val now = LocalDateTime.now(zone)
 
-        // Next 19:00
+        var nextStart = now.withHour(8).withMinute(0).withSecond(0).withNano(0)
+        if (!nextStart.isAfter(now)) nextStart = nextStart.plusDays(1)
+
         var nextStop = now.withHour(19).withMinute(0).withSecond(0).withNano(0)
-        if (nextStop.isBefore(now)) nextStop = nextStop.plusDays(1)
+        if (!nextStop.isAfter(now)) nextStop = nextStop.plusDays(1)
 
         am.setExactAndAllowWhileIdle(
             AlarmManager.RTC_WAKEUP,
-            nextStart.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli(),
+            nextStart.atZone(zone).toInstant().toEpochMilli(),
             startPI
         )
         am.setExactAndAllowWhileIdle(
             AlarmManager.RTC_WAKEUP,
-            nextStop.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli(),
+            nextStop.atZone(zone).toInstant().toEpochMilli(),
             stopPI
         )
+        Log.d("DailyScheduler", "next start=$nextStart next stop=$nextStop")
     }
 }
