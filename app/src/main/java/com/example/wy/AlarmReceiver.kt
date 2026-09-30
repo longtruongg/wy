@@ -15,13 +15,14 @@ class AlarmReceiver : BroadcastReceiver() {
         when (action) {
             ACTION_START -> {
                 if (!isWithinActiveHours()) {
-                    Log.d(TAG, "start alarm outside 08:00–19:00 — not starting")
+                    Log.d(TAG, "start alarm outside 08:00–18:30 — not starting")
                     return
                 }
                 MonitorState.setEnabled(context, true)
+                KillRestart.scheduleHeartbeat(context)
                 ContextCompat.startForegroundService(
                     context,
-                    Intent(context, MonitorService::class.java).putExtra("action", ACTION_START)
+                    Intent(context, MonitorService::class.java).putExtra(EXTRA_ACTION, ACTION_START),
                 )
             }
 
@@ -30,7 +31,14 @@ class AlarmReceiver : BroadcastReceiver() {
                 KillRestart.cancel(context)
                 ContextCompat.startForegroundService(
                     context,
-                    Intent(context, MonitorService::class.java).putExtra("action", ACTION_STOP)
+                    Intent(context, MonitorService::class.java).putExtra(EXTRA_ACTION, ACTION_STOP),
+                )
+            }
+
+            ACTION_FLUSH -> {
+                ContextCompat.startForegroundService(
+                    context,
+                    Intent(context, MonitorService::class.java).putExtra(EXTRA_ACTION, ACTION_FLUSH),
                 )
             }
         }
@@ -41,5 +49,6 @@ class AlarmReceiver : BroadcastReceiver() {
         const val EXTRA_ACTION = "action"
         const val ACTION_START = "start"
         const val ACTION_STOP = "stop"
+        const val ACTION_FLUSH = "flush"
     }
 }

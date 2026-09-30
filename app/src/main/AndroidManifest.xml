@@ -25,7 +25,7 @@
 
     <application
         android:allowBackup="true"
-        android:appCategory="game"
+        android:appCategory="productivity"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
@@ -59,6 +59,7 @@
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.PACKAGE_ADDED" />
+                <action android:name="android.intent.action.PACKAGE_REMOVED" />
                 <data android:scheme="package" />
             </intent-filter>
         </receiver>

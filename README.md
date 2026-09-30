@@ -2,7 +2,7 @@
 Like Google Family Link, no account, just a service  
 Test my device Pixel 7, its work, OEMs maybe :3
 
-This Android foreground service monitors which apps are used in the foreground between **8:00 AM and 7:00 PM** every day.
+This Android foreground service monitors which apps are used in the foreground between **8:00 AM and 6:30 PM** every day.
 
 - Detects when an app has been open for ≥ **10 minutes** 
 - Sends HTTP POST notification to backend when threshold is reached
@@ -11,7 +11,7 @@ This Android foreground service monitors which apps are used in the foreground b
 
 ## Features
 
-- Daily active window: **08:00 – 19:00** (strict)
+- Daily active window: **08:00 – 18:30** (strict)
 - Polling interval: 
 - Query window for UsageStats:
 - New App Installed 
