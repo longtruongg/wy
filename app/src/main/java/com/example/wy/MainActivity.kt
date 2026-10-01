@@ -18,6 +18,7 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
+import kotlinx.serialization.InternalSerializationApi
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
@@ -26,7 +27,6 @@ class MainActivity : AppCompatActivity() {
     private var askedUsage = false
     private var askedBattery = false
     private var askedExactAlarm = false
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
@@ -47,6 +47,7 @@ class MainActivity : AppCompatActivity() {
      * One settings screen at a time. On Android 10 there is no exact-alarm page
      * and no notification runtime permission; those exist only on newer OS versions.
      */
+    @SuppressLint("BatteryLife")
     private fun ensurePermissions(): Boolean {
         if (!hasUsageStatsPermission()) {
             if (!askedUsage) {
@@ -93,15 +94,28 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun ensureService() {
+//        val action = when {
+//            isWithinActiveHours() -> AlarmReceiver.ACTION_START
+//            HomeUpload.isUploadWindow() && EventQueue.hasPending(this) -> AlarmReceiver.ACTION_FLUSH
+//            DeliveryState.needsCatchUp(this) -> AlarmReceiver.ACTION_STOP
+//            else -> return
+//        }
+//        if (action == AlarmReceiver.ACTION_START && isServiceRunning(MonitorService::class.java)) return
+//        if (action == AlarmReceiver.ACTION_START) {
+//            MonitorState.setEnabled(this, true)
+//            KillRestart.scheduleHeartbeat(this)
+//        }
+//        ContextCompat.startForegroundService(
+//            this,
+//            Intent(this, MonitorService::class.java).putExtra(AlarmReceiver.EXTRA_ACTION, action),
+//        )
         if (!hasUsageStatsPermission()) return
-        val within = isWithinActiveHours()
-        if (!within && !DeliveryState.needsCatchUp(this)) return
-        if (within && isServiceRunning(MonitorService::class.java)) return
-        if (within) {
+        val action = MonitorAction.resolve(this) ?: return
+        if (action == AlarmReceiver.ACTION_START && isServiceRunning(MonitorService::class.java)) return
+        if (action == AlarmReceiver.ACTION_START) {
             MonitorState.setEnabled(this, true)
             KillRestart.scheduleHeartbeat(this)
         }
-        val action = if (within) AlarmReceiver.ACTION_START else AlarmReceiver.ACTION_STOP
         ContextCompat.startForegroundService(
             this,
             Intent(this, MonitorService::class.java).putExtra(AlarmReceiver.EXTRA_ACTION, action),
@@ -117,6 +131,7 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
+    @OptIn(InternalSerializationApi::class)
     private fun sendSelfUninstallAndUninstall() {
         val payload = PackageChangePayload(
             timestamp = isoTimestamp(System.currentTimeMillis()),
@@ -128,7 +143,8 @@ class MainActivity : AppCompatActivity() {
         Toast.makeText(this, "Notifying backend and uninstalling...", Toast.LENGTH_SHORT).show()
         Thread {
             try {
-                val codeOk = BackendClient.post(ApiPaths.UNINSTALLED, body)
+                val codeOk = BackendClient.post(this
+                    ,ApiPaths.UNINSTALLED, body)
                 Log.i(TAG, "self uninstall posted=$codeOk")
             } catch (e: Exception) {
                 Log.e(TAG, "self uninstall post failed", e)

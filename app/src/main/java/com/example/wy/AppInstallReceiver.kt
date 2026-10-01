@@ -40,13 +40,13 @@ class AppInstallReceiver : BroadcastReceiver() {
         val path = if (added) ApiPaths.INSTALLED else ApiPaths.UNINSTALLED
         Log.i(TAG, "${if (added) "installed" else "uninstalled"} $pkg")
         if (EventQueue.enqueue(context, id, path, Json.encodeToString(payload))) {
-            EventQueue.flush(context, RECEIVER_FLUSH_BUDGET_MS)
-            EventQueue.maybeScheduleRetry(context)
+            // Daytime installs stay queued. After 19:00 on home Wi-Fi this sends immediately.
+            EventQueue.flushIfHome(context, RECEIVER_FLUSH_BUDGET_MS)
         }
     }
 
     companion object {
         private const val TAG = "AppInstallReceiver"
-        private const val RECEIVER_FLUSH_BUDGET_MS = 8_000L
+        private const val RECEIVER_FLUSH_BUDGET_MS = 20_000L
     }
 }

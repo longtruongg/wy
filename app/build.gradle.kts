@@ -37,6 +37,12 @@ android {
 }
 
 dependencies {
+    implementation(libs.androidx.room3.common)
+    implementation(libs.androidx.work.runtime.ktx)
+    val room_version = "3.0.3"
+
+    implementation("androidx.room3:room3-runtime:$room_version")
+//    ksp("androidx.room3:room3-compiler:$room_version")
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
     implementation(libs.material)

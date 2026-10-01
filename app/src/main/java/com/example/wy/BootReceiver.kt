@@ -11,14 +11,11 @@ class BootReceiver : BroadcastReceiver() {
         if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
         Log.d(TAG, "boot completed")
         DailyScheduler.scheduler(context)
-        val within = isWithinActiveHours()
-        if (!within && !DeliveryState.needsCatchUp(context)) return
-
-        if (within) {
+        val action = MonitorAction.resolve(context) ?: return
+        if (action == AlarmReceiver.ACTION_START) {
             MonitorState.setEnabled(context, true)
             KillRestart.scheduleHeartbeat(context)
         }
-        val action = if (within) AlarmReceiver.ACTION_START else AlarmReceiver.ACTION_STOP
         ContextCompat.startForegroundService(
             context,
             Intent(context, MonitorService::class.java).putExtra(AlarmReceiver.EXTRA_ACTION, action),

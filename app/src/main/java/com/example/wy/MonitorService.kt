@@ -170,7 +170,6 @@ class MonitorService : Service() {
                 }
                 KillRestart.scheduleHeartbeat(this@MonitorService)
                 scanDueWindows()
-                EventQueue.flush(this@MonitorService, POLL_FLUSH_BUDGET_MS)
                 delay(POLL_INTERVAL_MS)
             }
         }
@@ -247,7 +246,7 @@ class MonitorService : Service() {
         thread(name = "finish-window") {
             try {
                 scanDueWindows()
-                EventQueue.flush(this, FINISH_FLUSH_BUDGET_MS)
+                // Rows wait on disk. The 19:00 alarm sends them once home Wi-Fi can see the backend.
                 EventQueue.maybeScheduleRetry(this)
             } finally {
                 stopSelf()
@@ -257,11 +256,13 @@ class MonitorService : Service() {
 
     private fun flushAsync(stopWhenIdle: Boolean) {
         thread(name = "flush-queue") {
-            EventQueue.flush(this, FINISH_FLUSH_BUDGET_MS)
-            if (!stopWhenIdle) return@thread
-            EventQueue.maybeScheduleRetry(this)
-            if (!isWithinActiveHours() && monitoringJob?.isActive != true) {
-                stopSelf()
+            try {
+                scanDueWindows()
+                EventQueue.flushIfHome(this, FINISH_FLUSH_BUDGET_MS)
+            } finally {
+                if (stopWhenIdle && !isWithinActiveHours() && monitoringJob?.isActive != true) {
+                    stopSelf()
+                }
             }
         }
     }
@@ -316,7 +317,6 @@ class MonitorService : Service() {
         private const val CHANNEL_ID = "monitor_channel"
         private const val NOTIFICATION_ID = 1
         private const val POLL_INTERVAL_MS = 30_000L
-        private const val POLL_FLUSH_BUDGET_MS = 15_000L
         private const val FINISH_FLUSH_BUDGET_MS = 45_000L
     }
 }
@@ -324,6 +324,7 @@ class MonitorService : Service() {
 object DailyScheduler {
     private const val REQUEST_START = 1001
     private const val REQUEST_STOP = 1002
+    private const val REQUEST_UPLOAD = 1005
 
     fun scheduler(ctx: Context) {
         val am = ctx.getSystemService(Context.ALARM_SERVICE) as AlarmManager
@@ -345,6 +346,13 @@ object DailyScheduler {
                 .putExtra(AlarmReceiver.EXTRA_ACTION, AlarmReceiver.ACTION_STOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
+        val uploadPi = PendingIntent.getBroadcast(
+            ctx,
+            REQUEST_UPLOAD,
+            Intent(ctx, AlarmReceiver::class.java)
+                .putExtra(AlarmReceiver.EXTRA_ACTION, AlarmReceiver.ACTION_FLUSH),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
         val zone = ZoneId.systemDefault()
         val now = LocalDateTime.now(zone)
         var nextStart = now.withHour(ActiveWindow.START_HOUR)
@@ -357,6 +365,11 @@ object DailyScheduler {
             .withSecond(0)
             .withNano(0)
         if (!nextStop.isAfter(now)) nextStop = nextStop.plusDays(1)
+        var nextUpload = now.withHour(HomeUpload.START_HOUR)
+            .withMinute(HomeUpload.START_MINUTE)
+            .withSecond(0)
+            .withNano(0)
+        if (!nextUpload.isAfter(now)) nextUpload = nextUpload.plusDays(1)
         try {
             am.setExactAndAllowWhileIdle(
                 AlarmManager.RTC_WAKEUP,
@@ -368,7 +381,12 @@ object DailyScheduler {
                 nextStop.atZone(zone).toInstant().toEpochMilli(),
                 stopPi,
             )
-            Log.d("DailyScheduler", "next start=$nextStart next stop=$nextStop")
+            am.setExactAndAllowWhileIdle(
+                AlarmManager.RTC_WAKEUP,
+                nextUpload.atZone(zone).toInstant().toEpochMilli(),
+                uploadPi,
+            )
+            Log.d("DailyScheduler", "next start=$nextStart next stop=$nextStop next upload=$nextUpload")
         } catch (e: SecurityException) {
             Log.e("DailyScheduler", "exact alarm denied", e)
         }
