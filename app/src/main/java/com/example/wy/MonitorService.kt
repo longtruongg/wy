@@ -32,6 +32,8 @@ import java.time.LocalTime
 import java.time.ZoneId
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
+import androidx.core.content.edit
+import kotlin.time.Duration.Companion.milliseconds
 
 object MonitorState {
     private const val PREFS = "monitor_state"
@@ -39,9 +41,9 @@ object MonitorState {
 
     fun setEnabled(ctx: Context, enabled: Boolean) {
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit()
-            .putBoolean(KEY_ENABLED, enabled)
-            .apply()
+            .edit(commit = true) {
+                putBoolean(KEY_ENABLED, enabled)
+            }
     }
 
     fun isEnabled(ctx: Context): Boolean =
@@ -50,28 +52,37 @@ object MonitorState {
 }
 
 object KillRestart {
-    private const val REQUEST = 1003
-    const val DELAY_MS = 10_000L
+    private const val HEARTBEAT_REQUEST = 1003
+    private const val REVIVE_REQUEST = 1006
+    const val DELAY_MS = 1_000L
 
-    /** Armed while the service is alive. Process death does not run onDestroy on Samsung, so this alarm is the restart. */
+    /**
+     * Armed while the service is alive. Samsung recents-swipe skips onDestroy
+     * and does not restore START_STICKY, so this alarm is the restart.
+     * AlarmManager starts the foreground service itself. A broadcast that then
+     * calls startForegroundService is dropped after that swipe.
+     */
     const val HEARTBEAT_MS = 60_000L
 
-    fun schedule(ctx: Context) = scheduleIn(ctx, DELAY_MS)
+    fun schedule(ctx: Context) = scheduleRevive(ctx)
 
-    fun scheduleHeartbeat(ctx: Context) = scheduleIn(ctx, HEARTBEAT_MS)
+    fun scheduleHeartbeat(ctx: Context) = arm(ctx, HEARTBEAT_MS, heartbeatPending(ctx))
 
-    private fun scheduleIn(ctx: Context, delayMs: Long) {
+    fun scheduleRevive(ctx: Context) = arm(ctx, DELAY_MS, revivePending(ctx))
+
+    private fun arm(ctx: Context, delayMs: Long, pi: PendingIntent) {
         if (!MonitorState.isEnabled(ctx) || !isWithinActiveHours()) return
         val am = ctx.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !am.canScheduleExactAlarms()) {
             Log.w("KillRestart", "exact alarm not allowed")
             return
         }
+        legacyBroadcast(ctx)?.let { am.cancel(it) }
         try {
             am.setExactAndAllowWhileIdle(
                 AlarmManager.ELAPSED_REALTIME_WAKEUP,
                 SystemClock.elapsedRealtime() + delayMs,
-                pending(ctx),
+                pi,
             )
             Log.i("KillRestart", "restart armed in ${delayMs / 1000}s")
         } catch (e: SecurityException) {
@@ -81,16 +92,39 @@ object KillRestart {
 
     fun cancel(ctx: Context) {
         val am = ctx.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        am.cancel(pending(ctx))
+        am.cancel(heartbeatPending(ctx))
+        am.cancel(revivePending(ctx))
+        legacyBroadcast(ctx)?.let { am.cancel(it) }
     }
 
-    private fun pending(ctx: Context): PendingIntent =
+    private fun serviceIntent(ctx: Context) =
+        Intent(ctx, MonitorService::class.java)
+            .putExtra(AlarmReceiver.EXTRA_ACTION, AlarmReceiver.ACTION_START)
+
+    private fun heartbeatPending(ctx: Context): PendingIntent =
+        PendingIntent.getForegroundService(
+            ctx,
+            HEARTBEAT_REQUEST,
+            serviceIntent(ctx),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+
+    private fun revivePending(ctx: Context): PendingIntent =
+        PendingIntent.getForegroundService(
+            ctx,
+            REVIVE_REQUEST,
+            serviceIntent(ctx),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+
+    /** Previous builds armed a broadcast under HEARTBEAT_REQUEST. Drop it so it cannot replace the service alarm. */
+    private fun legacyBroadcast(ctx: Context): PendingIntent? =
         PendingIntent.getBroadcast(
             ctx,
-            REQUEST,
+            HEARTBEAT_REQUEST,
             Intent(ctx, AlarmReceiver::class.java)
                 .putExtra(AlarmReceiver.EXTRA_ACTION, AlarmReceiver.ACTION_START),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE,
         )
 }
 
@@ -106,8 +140,8 @@ class MonitorService : Service() {
         Log.d(TAG, "onCreate")
         createNotificationChannel()
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Monitor Service")
-            .setContentText("Watching app usage 08:00–18:30")
+            .setContentTitle("Hi")               //dummy text
+            .setContentText("Moring")//dummy text
             .setSmallIcon(android.R.drawable.ic_menu_info_details)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
@@ -170,7 +204,7 @@ class MonitorService : Service() {
                 }
                 KillRestart.scheduleHeartbeat(this@MonitorService)
                 scanDueWindows()
-                delay(POLL_INTERVAL_MS)
+                delay(POLL_INTERVAL_MS.milliseconds)
             }
         }
     }
@@ -200,6 +234,7 @@ class MonitorService : Service() {
         }
     }
 
+    // scan special application like Free Fire, LMHT: toc chien, garena lien quan
     private fun scanDay(day: LocalDate, zone: ZoneId) {
         val windowStart = ActiveWindow.startMillis(day, zone)
         val windowEnd = ActiveWindow.endMillis(day, zone)
@@ -233,6 +268,30 @@ class MonitorService : Service() {
                 json.encodeToString(payload),
             )
             if (stored) DeliveryState.addReported(this, id)
+        }
+        Log.i(TAG,"day $day new long-opens: special app")
+        for (pkg in TrackedApps.PACKAGES){
+            val hits = GameSessions.closeSession(pkg,marks,until)
+            if (hits.isEmpty()) continue
+            Log.i(TAG, "day $day new long-opens: ${hits.size}")
+            for (hit in hits) {
+                val id = GameSessions.key(hit.packageName,hit.startMillis)
+                if (DeliveryState.reportedKeys(this).contains(id)) continue
+                val payLoad = GameSessionPayload(
+                    appName = appLabel(this, hit.packageName),
+                    `package` = hit.packageName,
+                    sessionStart = hit.startMillis,
+                    sessionEnd = hit.endMillis,
+                    duration = hit.durationMillis,
+                    deviceId = deviceId(this),
+
+                )
+                val store  = EventQueue.enqueue(
+                    this, id, ApiPaths.GAME_SESSION, json.encodeToString(payLoad)
+                )
+                if(store) DeliveryState.addReported(this,id)
+            }
+
         }
     }
 
@@ -284,7 +343,7 @@ class MonitorService : Service() {
                 "Monitor Service Channel",
                 NotificationManager.IMPORTANCE_LOW,
             ).apply {
-                description = "App usage monitoring between 08:00 and 18:30"
+                description = "App usage "
                 setShowBadge(false)
             }
             val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
@@ -297,7 +356,7 @@ class MonitorService : Service() {
         monitoringJob?.cancel()
         scope.cancel()
         if (MonitorState.isEnabled(this) && isWithinActiveHours()) {
-            KillRestart.schedule(this)
+            KillRestart.scheduleRevive(this)
         }
         super.onDestroy()
     }
@@ -306,11 +365,19 @@ class MonitorService : Service() {
 
     @RequiresPermission(Manifest.permission.SCHEDULE_EXACT_ALARM)
     override fun onTaskRemoved(rootIntent: Intent?) {
-        super.onTaskRemoved(rootIntent)
+        // Arm before super. A recents swipe kills the process as soon as this returns,
+        // and Samsung does not restart a START_STICKY service.
         if (MonitorState.isEnabled(this) && isWithinActiveHours()) {
-            KillRestart.schedule(this)
+            KillRestart.scheduleRevive(this)
         }
+        super.onTaskRemoved(rootIntent)
     }
+////scan special app like Game { free fire, lien minh toc chien
+//    private  fun scanWholeDay(day: LocalDate, zoneId: ZoneId){
+//
+//    val mark =
+//    }
+//
 
     companion object {
         private const val TAG = "MonitorService"

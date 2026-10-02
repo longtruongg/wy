@@ -44,10 +44,15 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!--
+            Recents swipe kills the process that owns the activity. The monitor
+            stays in :monitor so that swipe does not take the service with it.
+        -->
         <service
             android:name=".MonitorService"
             android:exported="false"
             android:foregroundServiceType="dataSync"
+            android:process=":monitor"
             android:stopWithTask="false">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
@@ -57,7 +62,8 @@
         <receiver
             android:name=".AppInstallReceiver"
             android:enabled="true"
-            android:exported="true">
+            android:exported="true"
+            android:process=":monitor">
             <intent-filter>
                 <action android:name="android.intent.action.PACKAGE_ADDED" />
                 <action android:name="android.intent.action.PACKAGE_REMOVED" />
@@ -66,14 +72,16 @@
         </receiver>
         <receiver
             android:name=".BootReceiver"
-            android:exported="true">
+            android:exported="true"
+            android:process=":monitor">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
         <receiver
             android:name=".AlarmReceiver"
-            android:exported="false" />
+            android:exported="false"
+            android:process=":monitor" />
     </application>
 
 </manifest>

@@ -8,7 +8,8 @@ import android.util.Log
 
 object BackendDiscovery {
     private const val TAG = "BackendDiscovery"
-    private const val SERVICE_TYPE = "_wytracker._tcp."
+    private const val SERVICE_TYPE = "_cathy._tcp."
+//    private const val SERVICE_TYPE = "_wytracker._tcp."
     private const val PREFS = "backend_discovery"
     private const val KEY_IP = "last_known_ip"
     private const val KEY_PORT = "last_known_port"
